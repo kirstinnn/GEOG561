@@ -1,1 +1,309 @@
+################################################################################
+rm(list = ls()) # REMOVE ALL OBJECTS 
+options(scipen = 999) # NO SCI NOTATION 
+# LAB 6 - SPATIAL AUTOCORRELATON
+# UPDATED MAY 29, 2024
 
+source_data <- "R:/GEOG561/Students/yeomansk/Labs/Lab6_SA"
+setwd(source_data) # SET THE WORKING DIRECTORY 
+
+install.packages("tidyverse")
+install.packages("dplyr")
+install.packages("tidycensus")
+install.packages("tidyr")
+install.packages("sf")
+install.packages("classInt")
+install.packages("spdep")
+install.packages("tmap")
+install.packages("patchwork")
+
+# GET PACKAGES (INSTALL IF NOT ALREADY ON YOUR MACHINE)
+require(tidyverse); require(dplyr); require(tidycensus); require(tidyr)# DATA MANAGEMENT
+require(sf); require(classInt); require(spdep);  # SPATIAL DATA
+require(tmap); require(patchwork) # DATA VIZ
+
+# USE CENSUS API KEY 
+census_api_key("b5bfe31eadc1a0f34e3403b397618173d7a1d4b5", install = T)  # INSTALL = T TO USE IN FUTURE SESSIONS
+
+
+################################################################################
+
+# GET DATA ON WHITE AND ONE OTHER RACE/ETHNICITY GROUP BY TRACT IN 
+# CONTRA COSTA COUNTY, CA
+
+pop_wht_asian_CA <- get_decennial(
+  state = "CA",
+  county = "Contra Costa",
+  geography = "tract",
+  variables = c("P2_005N", "P2_008N"), # 005 IS WHITE AND 008 IS ASIAN (COUNTS)
+  summary_var = "P2_001N", # TOTAL NUMBER OF PEOPLE IN THE CENSUS TRACT
+  geometry = TRUE,
+  year = 2020,
+  sumfile = "pl"
+) 
+
+# RENAME THE VARIABLES FOR INTERPRETABILY 
+pop_wht_asian_CA <- pop_wht_asian_CA %>%
+  mutate(variable = recode(variable, P2_005N = "White" , P2_008N = "Asian"))
+
+# EXPLORE THE DATA
+head(pop_wht_asian_CA)
+str(pop_wht_asian_CA)
+
+# CALCULATE PERCENTS BASED ON TOTAL NUMBER OF RACE DIVIDED BY TOTAL NUMBER PEOPLE IN THE CT
+pop_wht_asian_CA  <- mutate(pop_wht_asian_CA , per_race = (value / summary_value * 100))
+head(pop_wht_asian_CA)
+
+# SUMMARISE FOR EACH GROUP
+
+summarise_grps <- pop_wht_asian_CA %>% group_by(variable) %>%
+  summarise(summary_grp = list(round(summary(per_race),1))) # SUMMARY IS MULTIPLE THINGS
+# MIN, 1ST QUART, MEDIAN, MEAN, 3RD QUARTILE, MAX SO STORE IT IN A LIST 
+
+print(summarise_grps$summary_grp) # ACCESS THE THE LISTS 
+
+figure1 <- ggplot(data = pop_wht_asian_CA, aes(x = variable, y = per_race, fill = variable)) +
+ geom_boxplot() + 
+ scale_fill_manual(values = c("grey75", "grey75")) +
+ stat_summary(fun=mean, colour="red", geom="point",
+               shape=17, size=3, show.legend=FALSE) +
+ labs(x = "", y = "Percent of ethnicity per census tract", fill = "") + 
+ theme_bw() +
+ theme(legend.position = "none")
+
+figure1
+ggsave("figure1.png", plot = figure1)
+
+################################################################################
+
+# TASK 1 
+# PREPARE FOR MAPPING
+# GET THE CRS
+
+st_crs(pop_wht_asian_CA) # NAD83
+
+# PROJECT TO CA ALBERS 
+pop_wht_asian_CA_prj <-st_transform(pop_wht_asian_CA, crs = "EPSG:3310")
+
+
+# CHECK
+st_crs(pop_wht_asian_CA_prj) # LOOKS GOOD 
+
+# DROP EMPTY GEOMETRIES 
+pop_wht_asian_CA_prj <- pop_wht_asian_CA_prj[!st_is_empty(pop_wht_asian_CA_prj),drop=FALSE] 
+
+
+# plot(pop_wht_asian_CA_prj) # PRELIM PLOT 
+
+pop_asian_map <- tm_shape(pop_wht_asian_CA_prj %>% filter(variable == "Asian"))+ # FILTER TO ASIAN
+  tm_borders(col = "black") + # SEE THE CENSUS TRACTS
+  tm_fill("per_race", palette = "Reds", style='quantile', n=5, alpha=0.75, title="Percent Asian")+
+  # QUINTILES BEST FOR COMPARABILITY WITH OTHERS 
+  tm_legend(position=c("left","bottom"), bg.color="white", frame=T)+ # SO IT DOESNT COVER UP THE MAP
+  tm_layout(frame = T) # FORMATTING 
+
+
+# SAME FOR THIS MAP
+pop_white_map <- tm_shape(pop_wht_asian_CA_prj %>% filter(variable == "White"))+
+  tm_borders(col = "black") + # SEE THE CENSUS TRACTS 
+  tm_fill("per_race", palette = "Reds", style='quantile', n=5, alpha=0.75, title="Percent White")+
+  tm_legend(position=c("left","bottom"), bg.color="white", frame= T)+
+  tm_layout(frame=T) 
+
+
+figure2 <- tmap_arrange(pop_asian_map, pop_white_map, nrow = 2) # PLOT TMAPS TOGETHER
+figure2
+tmap_save(figure2, "figure2.png") # USE TMAP SAVE TO SAVE THEMATIC MAPS 
+
+
+################################################################################
+
+# TASK 2: GLOBAL MORAN'S I ANALYSIS 
+
+# FILTER TO WHITE AND ASIAN TO COMPLETE 
+
+# ASIAN
+
+# NB THAT THE NEIGHBORS/CENTROIDS WOULD BE THE SAME FOR EACH 
+# THIS IS MORE ILLUSTRATIVE
+asn_pop <- pop_wht_asian_CA_prj %>% filter(variable == "Asian")
+asian_nb <- poly2nb(asn_pop, queen = TRUE)
+summary(asian_nb)
+asn_centroids <- st_centroid(asn_pop)
+
+
+plot(st_geometry(asn_pop), border = "lightgray")
+plot(asian_nb, st_geometry(asn_pop), col= "red", add = TRUE)
+
+asian_lw <- nb2listw(asian_nb, style = "W", zero.policy = TRUE) # ASSIGN THE WEIGHTS
+
+asn_gmoran <- moran.test(asn_pop$per_race, asian_lw, alternative = "two.sided")
+
+# LOOK AT RESULTS 
+asn_gmoran
+
+# WHITE
+wht_pop <- pop_wht_asian_CA_prj %>% filter(variable == "White")
+white_nb <- poly2nb(wht_pop, queen = TRUE)
+summary(white_nb)
+wht_centroids <- st_centroid(wht_pop)
+
+plot(st_geometry(wht_pop), border = "lightgray")
+plot(white_nb, st_geometry(wht_pop), col= "red", add = TRUE)
+
+white_lw <- nb2listw(white_nb, style = "W", zero.policy = TRUE) # ASSIGN THE WEIGHTS
+
+wht_gmoran <- moran.test(wht_pop$per_race, white_lw, alternative = "two.sided")
+
+# look at results
+wht_gmoran
+
+################################################################################
+
+# TASK 3 
+# LOCAL MORAN'S I 
+
+asian_lmoran <- localmoran(asn_pop$per_race, asian_lw, alternative = "two.sided")
+
+
+head(asian_lmoran) # LOOK AT IT 
+
+asn_pop$lmI <- asian_lmoran[, "Ii"]                # local Moran's I
+asn_pop$lmZ <- asian_lmoran[, "Z.Ii"]              # z-scores
+asn_pop$lmp <- asian_lmoran[, "Pr(z != E(Ii))"]    # p-values
+
+p1 <- tm_shape(asn_pop) + # PLOT THE PERCENT RACE
+  tm_polygons(col = "per_race", title = "per_asian", style = "quantile") +
+  tm_legend(position=c("right","top"), bg.color="white", frame=FALSE, text.size = .8)+
+  tm_layout(frame=FALSE)
+
+p2 <- tm_shape(asn_pop) + # PLOT THE LOCAL MORAN'S I VALUES 
+  tm_polygons(col = "lmI", title = "Local Moran's I",style = "quantile", midpoint = NA) +
+  tm_legend(position=c("right","top"), bg.color="white", frame=FALSE, text.size = .8)+
+  tm_layout(frame=FALSE)
+
+p3 <- tm_shape(asn_pop) + # PLOT THE LOCAL MORAN'S I Z-SCORES 
+  tm_polygons(col = "lmZ", title = "Z-score",breaks = c(-Inf, 1.95, Inf)) +
+  tm_legend(position=c("right","top"), bg.color="white", frame=FALSE, text.size = .8)+
+  tm_layout(frame=FALSE)
+
+p4 <- tm_shape(asn_pop) + # PLOT THE LMI P-VALUES 
+  tm_polygons(col = "lmp", title = "p-value",breaks = c(-Inf, 0.05, Inf)) +
+  tm_legend(position=c("right","top"), bg.color="white", frame=FALSE, text.size = .8)+
+  tm_layout(frame=FALSE)
+
+tmap_arrange(p1, p2, p3, p4)
+
+
+# CHANGE TO DATA FRAME 
+asian_lmoran_df <- as.data.frame(asian_lmoran) 
+
+# ADD THE PVALUES 
+asn_pop$pvalue <- asian_lmoran_df$'Pr(z != E(Ii))'
+
+# create a color palette
+pal1 <- c("#DE2D26","#FC9272", "#FEE0D2", "grey90")
+
+# map the data
+tm_shape(asn_pop) + 
+  tm_polygons(style="fixed", breaks = c(0, 0.001, 0.01, 0.05, 0.5),
+              col = "pvalue", palette=pal1, border.col = "grey80", lwd = 0.5) +
+  tm_legend(position=c("right","top"), bg.color="white", frame=FALSE, text.size = .8)+
+  tm_layout(frame = FALSE) 
+
+# IDENTIFY HOTSPOTS 
+asn_pop$Ii_sig <- hotspot(asian_lmoran, Prname="Pr(z != E(Ii))", cutoff = 0.05, p.adjust = "none")
+
+# Replace NA with ">0.05". This requires that the Ii factor be re-leveled
+asn_pop$Ii_sig <- factor(asn_pop$Ii_sig, levels=c("High-High","Low-Low", "Low-High", "High-Low", ">0.05"))
+asn_pop$Ii_sig[is.na(asn_pop$Ii_sig)] <- ">0.05"
+
+
+
+# create color palette
+pal2 <- c( "#FF0000", "#0000FF", "#a7adf9", "#f4ada8","#ededed")
+
+# map the data
+asian_hilow <- tm_shape(asn_pop) + 
+  tm_polygons(style="cat", border.col = "grey80", lwd = 0.5,
+      col = "Ii_sig", title = "Significant clusters - Asian", palette=pal2) +
+        tm_legend(position=c("left","bottom"), bg.color="white", frame=T, text.size = .8) +
+        tm_layout(frame = T)
+
+asian_hilow 
+
+# SAME THING FOR WHITE
+
+white_lmoran <- localmoran(wht_pop$per_race, white_lw, alternative = "two.sided")
+
+# look at results
+head(white_lmoran)
+
+wht_pop$lmI <- white_lmoran[, "Ii"]                # local Moran's I
+wht_pop$lmZ <- white_lmoran[, "Z.Ii"]              # z-scores
+wht_pop$lmp <- white_lmoran[, "Pr(z != E(Ii))"]    # p-values
+
+p1 <- tm_shape(wht_pop) +
+  tm_polygons(col = "per_race", title = "per_white", style = "quantile") +
+  tm_legend(position=c("right","top"), bg.color="white", frame=FALSE, text.size = .8)+
+  tm_layout(frame=FALSE)
+
+p2 <- tm_shape(wht_pop) +
+  tm_polygons(col = "lmI", title = "Local Moran's I",style = "quantile", midpoint = NA) +
+  tm_legend(position=c("right","top"), bg.color="white", frame=FALSE, text.size = .8)+
+  tm_layout(frame=FALSE)
+
+p3 <- tm_shape(wht_pop) +
+  tm_polygons(col = "lmZ", title = "Z-score",breaks = c(-Inf, 1.95, Inf)) +
+  tm_legend(position=c("right","top"), bg.color="white", frame=FALSE, text.size = .8)+
+  tm_layout(frame=FALSE)
+
+p4 <- tm_shape(wht_pop) +
+  tm_polygons(col = "lmp", title = "p-value",breaks = c(-Inf, 0.05, Inf)) +
+  tm_legend(position=c("right","top"), bg.color="white", frame=FALSE, text.size = .8)+
+  tm_layout(frame=FALSE)
+
+tmap_arrange(p1, p2, p3, p4)
+
+
+# make the localmoran object into a data.frame
+white_lmoran_df <- as.data.frame(white_lmoran) 
+
+# join/attach to the sf as new field sim_pvalue
+wht_pop$pvalue <- white_lmoran_df$'Pr(z != E(Ii))'
+
+# create a color palette
+pal1 <- c("#DE2D26","#FC9272", "#FEE0D2", "grey90")
+
+# map the data
+tm_shape(wht_pop) + 
+  tm_polygons(style="fixed", breaks = c(0, 0.001, 0.01, 0.05, 0.5),
+              col = "pvalue", palette=pal1, border.col = "grey80", lwd = 0.5) +
+  tm_legend(position=c("right","top"), bg.color="white", frame=FALSE, text.size = .8)+
+  tm_layout(frame = FALSE) 
+
+
+
+wht_pop$Ii_sig <- hotspot(white_lmoran, Prname="Pr(z != E(Ii))", cutoff = 0.05, p.adjust = "none")
+
+# Replace NA with ">0.05". This requires that the Ii factor be re-leveled
+wht_pop$Ii_sig <- factor(wht_pop$Ii_sig, levels=c("High-High","Low-Low", "Low-High", "High-Low", ">0.05"))
+wht_pop$Ii_sig[is.na(wht_pop$Ii_sig)] <- ">0.05"
+
+
+
+
+# create color palette
+pal2 <- c( "#FF0000", "#0000FF", "#a7adf9", "#f4ada8","#ededed")
+
+# map the data
+wht_hilow <- tm_shape(wht_pop) + 
+  tm_polygons(style="cat", border.col = "grey80", lwd = 0.5,
+              col = "Ii_sig", title = "Significant clusters - White", palette=pal2) +
+  tm_legend(position=c("left","bottom"), bg.color="white", frame=T, text.size = .8) +
+  tm_layout(frame = T)
+
+
+figure4 <- tmap_arrange(asian_hilow, wht_hilow, nrow = 2) # PLOT TMAPS TOGETHER
+figure4
+tmap_save(figure4, "figure4.png") # USE TMAP SAVE TO SAVE THEMATIC MAPS 
